@@ -37,6 +37,7 @@
 #include <OpenSSL/opensslconf.h>
 #include <OpenSSL/cryptoerr.h>
 #include <OpenSSL/core.h>
+#include <sys/_types/_time_t.h>
 
 # ifdef CHARSET_EBCDIC
 #include <OpenSSL/ebcdic.h>
