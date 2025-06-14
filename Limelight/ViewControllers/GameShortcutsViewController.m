@@ -287,7 +287,8 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 }
 
 - (void)setupNavigationBar {
-    self.title = @"GameSphere";
+    // Don't set title since we have a custom header view
+    self.title = @"";
     
     // Style navigation bar
     self.navigationController.navigationBar.barTintColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:0.95];
