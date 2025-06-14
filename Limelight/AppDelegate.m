@@ -7,6 +7,7 @@
 //
 
 #import "AppDelegate.h"
+#import "GameShortcutsViewController.h"
 
 @implementation AppDelegate
 
@@ -29,7 +30,31 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
         _pcUuidToLoad = (NSString*)[shortcut.userInfo objectForKey:@"UUID"];
     }
 #endif
+    
+    // Override the root view controller to use our custom GameShortcutsViewController
+    [self setupCustomRootViewController];
+    
     return YES;
+}
+
+- (void)setupCustomRootViewController {
+    // Create our custom game shortcuts view controller
+    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
+    layout.minimumLineSpacing = 20;
+    layout.minimumInteritemSpacing = 20;
+    layout.sectionInset = UIEdgeInsetsMake(20, 20, 20, 20);
+    
+    GameShortcutsViewController *gameShortcutsVC = [[GameShortcutsViewController alloc] initWithCollectionViewLayout:layout];
+    
+    // Wrap it in a navigation controller
+    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:gameShortcutsVC];
+#if !TARGET_OS_TV
+    navController.navigationBar.barStyle = UIBarStyleBlack;
+#endif
+    navController.navigationBar.translucent = YES;
+    
+    // Set as the root view controller
+    self.window.rootViewController = navController;
 }
 
 #if !TARGET_OS_TV
@@ -38,30 +63,6 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
     _shortcutCompletionHandler = completionHandler;
 }
 #endif
-
-- (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options {
-    if ([url.host isEqualToString:@"appClicked"]) {
-        NSString *query = [url query];
-        NSArray *params = [query componentsSeparatedByString:@"&"];
-        NSMutableDictionary *queryParameters = [NSMutableDictionary dictionary];
-        
-        for (NSString *param in params) {
-            NSArray *keyValue = [param componentsSeparatedByString:@"="];
-            if ([keyValue count] == 2) {
-                queryParameters[keyValue[0]] = keyValue[1];
-            }
-        }
-        
-        NSString *appId = queryParameters[@"app"];
-        NSString *UUID = queryParameters[@"UUID"];
-        
-        _pcUuidToLoad = UUID;
-        _appToRun = appId;
-
-        return YES;
-    }
-    return NO;
-}
 
 - (void)applicationWillResignActive:(UIApplication *)application
 {

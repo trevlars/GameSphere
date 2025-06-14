@@ -19,7 +19,6 @@
                            width:(NSInteger)width
                 audioConfig:(NSInteger)audioConfig
                 onscreenControls:(NSInteger)onscreenControls
-                      motionMode:(NSInteger)motionMode
                    optimizeGames:(BOOL)optimizeGames
                  multiController:(BOOL)multiController
                  swapABXYButtons:(BOOL)swapABXYButtons
@@ -36,9 +35,7 @@
 - (void) updateAppsForExistingHost:(TemporaryHost *)host;
 - (void) removeHost:(TemporaryHost*)host;
 - (void) removeApp:(TemporaryApp*)app;
-#if TARGET_OS_TV
-- (void)moveAppUpInList:(NSString *)appId;
-#endif
+
 - (TemporarySettings*) getSettings;
 
 - (void) updateUniqueId:(NSString*)uniqueId;

@@ -26,6 +26,7 @@
 #import "TemporaryApp.h"
 #import "IdManager.h"
 #import "ConnectionHelper.h"
+#import "GameListManager.h"
 
 #if !TARGET_OS_TV
 #import "SettingsViewController.h"
@@ -200,23 +201,13 @@ static NSMutableSet* hostList;
                     return;
                 }
                 
+                // Store the app list in the singleton for global access
+                [[GameListManager sharedManager] updateGamesFromHost:host];
+                
                 [self updateAppsForHost:host];
                 [self->_appManager stopRetrieving];
                 [self->_appManager retrieveAssetsFromHost:host];
                 [self hideLoadingFrame: nil];
-                
-                AppDelegate* delegate = (AppDelegate*)[UIApplication sharedApplication].delegate;
-                if (delegate.appToRun != nil)
-                {
-                    for (TemporaryApp *app in host.appList) {
-                        if ([app.id isEqualToString:delegate.appToRun]) {
-                            [self appClicked:app view:nil];
-                            break;
-                        }
-                    }     
-                    delegate.appToRun = nil;               
-                }
-                
             });
         }
     });
@@ -652,7 +643,6 @@ static NSMutableSet* hostList;
     _streamConfig.playAudioOnPC = streamSettings.playAudioOnPC;
     _streamConfig.useFramePacing = streamSettings.useFramePacing;
     _streamConfig.swapABXYButtons = streamSettings.swapABXYButtons;
-    _streamConfig.motionMode = [streamSettings.motionMode intValue];
     
     // multiController must be set before calling getConnectedGamepadMask
     _streamConfig.multiController = streamSettings.multiController;
@@ -864,13 +854,8 @@ static NSMutableSet* hostList;
         // before we call prepareToStreamApp.
         [[self revealViewController] revealToggleAnimated:NO];
     }
-    
-#else
-    
-    DataManager* database = [[DataManager alloc] init];
-    [database moveAppUpInList:app.id];
 #endif
-
+    
     if ([self findRunningApp:app.host]) {
         // If there's a running app, display a menu
         [self appLongClicked:app view:view];
@@ -941,6 +926,16 @@ static NSMutableSet* hostList;
 - (void)viewDidLoad
 {
     [super viewDidLoad];
+    
+    // Add observers for game shortcut notifications
+    [[NSNotificationCenter defaultCenter] addObserver:self 
+                                             selector:@selector(handleLaunchGameFromShortcut:) 
+                                                 name:@"LaunchGameFromShortcut" 
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self 
+                                             selector:@selector(handleRefreshGamesRequested:) 
+                                                 name:@"RefreshGamesRequested" 
+                                               object:nil];
         
 #if !TARGET_OS_TV
     // Set the side bar button action. When it's tapped, it'll show the sidebar.
@@ -1454,6 +1449,32 @@ static NSMutableSet* hostList;
     }
     [context.previouslyFocusedView setAlpha:1.0];
 #endif
+}
+
+#pragma mark - Game Shortcut Handlers
+
+- (void)handleLaunchGameFromShortcut:(NSNotification *)notification {
+    TemporaryApp *app = notification.userInfo[@"app"];
+    TemporaryHost *host = notification.userInfo[@"host"];
+    
+    if (app && host) {
+        // Set the selected host and launch the game
+        _selectedHost = host;
+        [self prepareToStreamApp:app];
+        [self performSegueWithIdentifier:@"createStreamFrame" sender:nil];
+    }
+}
+
+- (void)handleRefreshGamesRequested:(NSNotification *)notification {
+    // Refresh the games by re-connecting to the selected host
+    GameListManager *manager = [GameListManager sharedManager];
+    if (manager.selectedHost) {
+        [self hostClicked:manager.selectedHost view:nil];
+    }
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 @end

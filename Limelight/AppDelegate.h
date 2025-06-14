@@ -12,7 +12,6 @@
 
 @property (strong, nonatomic) UIWindow *window;
 @property (strong, nonatomic) NSString *pcUuidToLoad;
-@property (strong, nonatomic) NSString *appToRun;
 @property (strong, nonatomic) void (^shortcutCompletionHandler)(BOOL);
 
 @property (readonly, strong, nonatomic) NSManagedObjectContext *managedObjectContext;
