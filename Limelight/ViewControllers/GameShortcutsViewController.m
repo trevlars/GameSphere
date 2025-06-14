@@ -12,10 +12,24 @@
 #import "TemporaryHost.h"
 #import "UIAppView.h"
 #import "MainFrameViewController.h"
+#import "StreamFrameViewController.h"
+#import "StreamConfiguration.h"
+#import "DataManager.h"
+#import "TemporarySettings.h"
+#import "AppAssetManager.h"
+#import "CryptoManager.h"
+#import "IdManager.h"
+#import "ControllerSupport.h"
+#import "Utils.h"
+#import <AVFoundation/AVFoundation.h>
+#import <VideoToolbox/VideoToolbox.h>
+#import <sys/utsname.h>
+#include <Limelight.h>
 
 @interface GameShortcutsViewController () <AppCallback>
 @property (nonatomic, strong) NSArray<TemporaryApp *> *games;
 @property (nonatomic, strong) NSCache *boxArtCache;
+@property (nonatomic, strong) StreamConfiguration *streamConfig;
 @end
 
 @implementation GameShortcutsViewController
@@ -202,14 +216,128 @@
 #pragma mark - AppCallback
 
 - (void)appClicked:(TemporaryApp *)app view:(UIView *)view {
-    // Post notification to launch the game
-    NSDictionary *userInfo = @{@"app": app, @"host": [GameListManager sharedManager].selectedHost};
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"LaunchGameFromShortcut" object:nil userInfo:userInfo];
+    // Prepare stream configuration and launch the game directly
+    [self prepareToStreamApp:app];
+    [self launchStreamingViewController];
 }
 
 - (void)appLongClicked:(TemporaryApp *)app view:(UIView *)view {
     // For now, just treat long clicks as regular clicks
     [self appClicked:app view:view];
+}
+
+#pragma mark - Game Launching
+
+- (void)prepareToStreamApp:(TemporaryApp *)app {
+    self.streamConfig = [[StreamConfiguration alloc] init];
+    self.streamConfig.host = app.host.activeAddress;
+    self.streamConfig.httpsPort = app.host.httpsPort;
+    self.streamConfig.appID = app.id;
+    self.streamConfig.appName = app.name;
+    self.streamConfig.serverCert = app.host.serverCert;
+    
+    DataManager* dataMan = [[DataManager alloc] init];
+    TemporarySettings* streamSettings = [dataMan getSettings];
+    
+    self.streamConfig.frameRate = [streamSettings.framerate intValue];
+    if (@available(iOS 10.3, *)) {
+        // Don't stream more FPS than the display can show
+        if (self.streamConfig.frameRate > [UIScreen mainScreen].maximumFramesPerSecond) {
+            self.streamConfig.frameRate = (int)[UIScreen mainScreen].maximumFramesPerSecond;
+            Log(LOG_W, @"Clamping FPS to maximum refresh rate: %d", self.streamConfig.frameRate);
+        }
+    }
+    
+    self.streamConfig.height = [streamSettings.height intValue];
+    self.streamConfig.width = [streamSettings.width intValue];
+#if TARGET_OS_TV
+    // Don't allow streaming 4K on the Apple TV HD
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    if (strcmp(systemInfo.machine, "AppleTV5,3") == 0 && self.streamConfig.height >= 2160) {
+        Log(LOG_W, @"4K streaming not supported on Apple TV HD");
+        self.streamConfig.width = 1920;
+        self.streamConfig.height = 1080;
+    }
+#endif
+    
+    self.streamConfig.bitRate = [streamSettings.bitrate intValue];
+    self.streamConfig.optimizeGameSettings = streamSettings.optimizeGames;
+    self.streamConfig.playAudioOnPC = streamSettings.playAudioOnPC;
+    self.streamConfig.useFramePacing = streamSettings.useFramePacing;
+    self.streamConfig.swapABXYButtons = streamSettings.swapABXYButtons;
+    
+    // multiController must be set before calling getConnectedGamepadMask
+    self.streamConfig.multiController = streamSettings.multiController;
+    self.streamConfig.gamepadMask = [ControllerSupport getConnectedGamepadMask:self.streamConfig];
+    
+    // Probe for supported channel configurations
+    int physicalOutputChannels = (int)[AVAudioSession sharedInstance].maximumOutputNumberOfChannels;
+    Log(LOG_I, @"Audio device supports %d channels", physicalOutputChannels);
+    
+    int numberOfChannels = MIN([streamSettings.audioConfig intValue], physicalOutputChannels);
+    Log(LOG_I, @"Selected number of audio channels %d", numberOfChannels);
+    if (numberOfChannels >= 8) {
+        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_71_SURROUND;
+    }
+    else if (numberOfChannels >= 6) {
+        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_51_SURROUND;
+    }
+    else {
+        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
+    }
+    
+    self.streamConfig.serverCodecModeSupport = app.host.serverCodecModeSupport;
+    
+    switch (streamSettings.preferredCodec) {
+        case CODEC_PREF_AV1:
+#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
+            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
+                self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
+            }
+#endif
+            // Fall-through
+            
+        case CODEC_PREF_AUTO:
+        case CODEC_PREF_HEVC:
+            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
+                self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
+            }
+            // Fall-through
+            
+        case CODEC_PREF_H264:
+            self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264;
+            break;
+    }
+    
+    // HEVC is supported if the user wants it (or it's required by the chosen resolution) and the SoC supports it
+    if ((self.streamConfig.width > 4096 || self.streamConfig.height > 4096 || streamSettings.enableHdr) && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
+        self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
+        
+        // HEVC Main10 is supported if the user wants it and the display supports it
+        if (streamSettings.enableHdr && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
+            self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
+        }
+    }
+    
+#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
+    // Add the AV1 Main10 format if AV1 and HDR are both enabled and supported
+    if ((self.streamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && streamSettings.enableHdr &&
+        VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
+        self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
+    }
+#endif
+}
+
+- (void)launchStreamingViewController {
+    // Create the streaming view controller directly since it doesn't have a storyboard identifier
+    StreamFrameViewController *streamVC = [[StreamFrameViewController alloc] init];
+    
+    // Set the stream configuration
+    streamVC.streamConfig = self.streamConfig;
+    
+    // Present the streaming view controller
+    [self.navigationController pushViewController:streamVC animated:YES];
 }
 
 #pragma mark - UICollectionViewDelegateFlowLayout
