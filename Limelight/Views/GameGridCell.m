@@ -168,11 +168,33 @@
 - (void)configureWithROM:(NSDictionary *)romData {
     self.gameTitleLabel.text = romData[@"name"] ?: @"Unknown Game";
     
-    // Set placeholder image
-    self.gameImageView.image = [UIImage imageNamed:@"default_rom_icon"];
+    // Set placeholder image initially
+    self.gameImageView.image = [UIImage imageNamed:@"NoAppImage"];
     
-    // Load ROM artwork from IGDB (you'll implement this)
-    // [self loadIGDBImageForROM:romData];
+    // Load ROM artwork from IGDB if available
+    [self loadIGDBImageForROM:romData];
+}
+
+- (void)loadIGDBImageForROM:(NSDictionary *)romData {
+    // Check if we already have a cover URL from IGDB
+    NSString *coverURL = romData[@"cover_url"];
+    if (coverURL && coverURL.length > 0) {
+        // Load image from URL
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSData *imageData = [NSData dataWithContentsOfURL:[NSURL URLWithString:coverURL]];
+            if (imageData) {
+                UIImage *coverImage = [UIImage imageWithData:imageData];
+                if (coverImage) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        // Only update if this cell is still showing the same ROM
+                        if ([self.gameTitleLabel.text isEqualToString:romData[@"name"]]) {
+                            self.gameImageView.image = coverImage;
+                        }
+                    });
+                }
+            }
+        });
+    }
 }
 
 - (void)setFocused:(BOOL)focused animated:(BOOL)animated {

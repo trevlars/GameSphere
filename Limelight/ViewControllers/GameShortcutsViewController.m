@@ -125,6 +125,11 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.gameCollectionView reloadData];
     });
+    
+    // Load IGDB metadata for ROM games after a short delay to allow authentication
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self loadIGDBMetadataForROMs];
+    });
 }
 
 - (void)startDiscoveryImmediately {
@@ -497,15 +502,21 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
             if (cover && cover[@"image_id"]) {
                 NSString *imageURL = [igdbManager constructImageURL:cover[@"image_id"] size:@"cover_big"];
                 updatedGame[@"cover_url"] = imageURL;
+                NSLog(@"IGDB: Found cover art for %@: %@", gameName, imageURL);
             }
             
-            self.allGames[index] = updatedGame;
+            // Replace the game in the array
+            [self.allGames replaceObjectAtIndex:index withObject:updatedGame];
             
             // Reload the specific cell
             dispatch_async(dispatch_get_main_queue(), ^{
-                NSIndexPath *indexPath = [NSIndexPath indexPathForItem:index inSection:0];
-                [self.gameCollectionView reloadItemsAtIndexPaths:@[indexPath]];
+                if (index < self.allGames.count) {
+                    NSIndexPath *indexPath = [NSIndexPath indexPathForItem:index inSection:0];
+                    [self.gameCollectionView reloadItemsAtIndexPaths:@[indexPath]];
+                }
             });
+        } else {
+            NSLog(@"IGDB: Failed to load data for %@: %@", gameName, error.localizedDescription);
         }
     }];
 }
@@ -549,8 +560,36 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 }
 
 - (void)collectionView:(UICollectionView *)collectionView didHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    // Only update focus on highlight for non-tvOS platforms
+#if !TARGET_OS_TV
     [self updateFocusForIndexPath:indexPath];
+#endif
 }
+
+#if TARGET_OS_TV
+// MARK: - tvOS Focus Engine Support
+
+- (BOOL)collectionView:(UICollectionView *)collectionView canFocusItemAtIndexPath:(NSIndexPath *)indexPath {
+    return YES;
+}
+
+- (void)collectionView:(UICollectionView *)collectionView didUpdateFocusInContext:(UICollectionViewFocusUpdateContext *)context withAnimationCoordinator:(UIFocusAnimationCoordinator *)coordinator {
+    // Handle focus changes on tvOS
+    if (context.nextFocusedIndexPath) {
+        [coordinator addCoordinatedAnimations:^{
+            [self updateFocusForIndexPath:context.nextFocusedIndexPath];
+        } completion:nil];
+    }
+    
+    // Remove focus from previous cell
+    if (context.previouslyFocusedIndexPath) {
+        GameGridCell *previousCell = (GameGridCell *)[collectionView cellForItemAtIndexPath:context.previouslyFocusedIndexPath];
+        [coordinator addCoordinatedAnimations:^{
+            [previousCell setFocused:NO animated:YES];
+        } completion:nil];
+    }
+}
+#endif
 
 - (void)updateFocusForIndexPath:(NSIndexPath *)indexPath {
     // Remove focus from previous cell
