@@ -39,6 +39,7 @@
     UITapGestureRecognizer *_menuTapGestureRecognizer;
     UITapGestureRecognizer *_menuDoubleTapGestureRecognizer;
     UITapGestureRecognizer *_playPauseTapGestureRecognizer;
+    UILongPressGestureRecognizer *_playPauseLongPressGestureRecognizer;
     UITextView *_overlayView;
     UILabel *_stageLabel;
     UILabel *_tipLabel;
@@ -47,6 +48,13 @@
     UIScrollView *_scrollView;
     BOOL _userIsInteracting;
     CGSize _keyboardSize;
+    
+    // Long press exit functionality
+    NSTimer *_exitTimer;
+    BOOL _selectButtonPressed;
+    BOOL _startButtonPressed;
+    NSDate *_selectStartPressTime;
+    BOOL _userRequestedExit;
     
 #if !TARGET_OS_TV
     UIScreenEdgePanGestureRecognizer *_exitSwipeRecognizer;
@@ -69,8 +77,15 @@
     [self returnToMainFrame];
 }
 - (void)controllerPlayPauseButtonPressed:(id)sender {
-    Log(LOG_I, @"Play/Pause button pressed -- backing out of stream");
-    [self returnToMainFrame];
+    Log(LOG_I, @"Play/Pause button pressed -- terminating stream");
+    [self terminateStreamAndReturn];
+}
+
+- (void)controllerPlayPauseLongPressed:(UILongPressGestureRecognizer *)sender {
+    if (sender.state == UIGestureRecognizerStateBegan) {
+        Log(LOG_I, @"Play/Pause button held for 3 seconds -- terminating stream");
+        [self terminateStreamAndReturn];
+    }
 }
 #endif
 
@@ -106,17 +121,24 @@
     
     _controllerSupport = [[ControllerSupport alloc] initWithConfig:self.streamConfig delegate:self];
     _inactivityTimer = nil;
+    _userRequestedExit = NO;
     
     _streamView = [[StreamView alloc] initWithFrame:self.view.frame];
     [_streamView setupStreamView:_controllerSupport interactionDelegate:self config:self.streamConfig];
     
 #if TARGET_OS_TV
-    if (!_menuTapGestureRecognizer || !_menuDoubleTapGestureRecognizer || !_playPauseTapGestureRecognizer) {
+    if (!_menuTapGestureRecognizer || !_menuDoubleTapGestureRecognizer || !_playPauseTapGestureRecognizer || !_playPauseLongPressGestureRecognizer) {
         _menuTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPauseButtonPressed:)];
         _menuTapGestureRecognizer.allowedPressTypes = @[@(UIPressTypeMenu)];
 
         _playPauseTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPlayPauseButtonPressed:)];
         _playPauseTapGestureRecognizer.allowedPressTypes = @[@(UIPressTypePlayPause)];
+        
+        // Long press gesture for 3-second hold to exit
+        _playPauseLongPressGestureRecognizer = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPlayPauseLongPressed:)];
+        _playPauseLongPressGestureRecognizer.allowedPressTypes = @[@(UIPressTypePlayPause)];
+        _playPauseLongPressGestureRecognizer.minimumPressDuration = 3.0; // 3 seconds
+        [_playPauseTapGestureRecognizer requireGestureRecognizerToFail:_playPauseLongPressGestureRecognizer];
         
         _menuDoubleTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllerPauseButtonDoublePressed:)];
         _menuDoubleTapGestureRecognizer.numberOfTapsRequired = 2;
@@ -127,6 +149,7 @@
     [self.view addGestureRecognizer:_menuTapGestureRecognizer];
     [self.view addGestureRecognizer:_menuDoubleTapGestureRecognizer];
     [self.view addGestureRecognizer:_playPauseTapGestureRecognizer];
+    [self.view addGestureRecognizer:_playPauseLongPressGestureRecognizer];
 
 #else
     _exitSwipeRecognizer = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(edgeSwiped)];
@@ -141,9 +164,9 @@
     [_tipLabel setUserInteractionEnabled:NO];
     
 #if TARGET_OS_TV
-    [_tipLabel setText:@"Tip: Tap the Play/Pause button on the Apple TV Remote to disconnect from your PC"];
+    [_tipLabel setText:@"Tip: Tap Play/Pause to disconnect, or hold Play/Pause for 3 seconds to exit stream"];
 #else
-    [_tipLabel setText:@"Tip: Swipe from the left edge to disconnect from your PC"];
+    [_tipLabel setText:@"Tip: Swipe from the left edge to disconnect, or hold Select+Start for 3 seconds to exit stream"];
 #endif
     
     [_tipLabel sizeToFit];
@@ -312,7 +335,14 @@
     [_statsUpdateTimer invalidate];
     _statsUpdateTimer = nil;
     
-    [self.navigationController popToRootViewControllerAnimated:YES];
+    // Check if this view controller was presented modally or pushed
+    if (self.presentingViewController) {
+        // Modally presented - dismiss it
+        [self dismissViewControllerAnimated:YES completion:nil];
+    } else {
+        // Pushed onto navigation stack - pop it
+        [self.navigationController popToRootViewControllerAnimated:YES];
+    }
 }
 
 // This will fire if the user opens control center or gets a low battery message
@@ -391,6 +421,12 @@
 
 - (void)connectionTerminated:(int)errorCode {
     Log(LOG_I, @"Connection terminated: %d", errorCode);
+    
+    // If user requested exit, don't show error dialogs or try to navigate again
+    if (_userRequestedExit) {
+        Log(LOG_I, @"User requested exit - skipping error handling");
+        return;
+    }
     
     unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
     unsigned int portTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
@@ -631,6 +667,17 @@
     // Dispose of any resources that can be recreated.
 }
 
+- (void)dealloc {
+    // Clean up exit timer
+    if (_exitTimer) {
+        [_exitTimer invalidate];
+        _exitTimer = nil;
+    }
+    
+    // Reset exit flag
+    _userRequestedExit = NO;
+}
+
 - (void)gamepadPresenceChanged {
 #if !TARGET_OS_TV
     if (@available(iOS 11.0, *)) {
@@ -651,6 +698,80 @@
     Log(LOG_I, @"Gamepad combo requested stream exit");
     
     [self returnToMainFrame];
+}
+
+- (void) controllerButtonsChanged:(int)buttonFlags {
+    // Check for select+start combo for 3-second hold exit
+    [self checkSelectStartCombo:buttonFlags];
+}
+
+- (void)exitStreamWithMessage:(NSString *)message {
+    Log(LOG_I, @"%@", message);
+    
+    // Cancel any pending exit timer
+    if (_exitTimer) {
+        [_exitTimer invalidate];
+        _exitTimer = nil;
+    }
+    
+    [self terminateStreamAndReturn];
+}
+
+- (void)terminateStreamAndReturn {
+    // Set flag to prevent double navigation from connectionTerminated callback
+    _userRequestedExit = YES;
+    
+    // Properly stop the stream first
+    [_streamMan stopStream];
+    
+    // Wait a moment for the stream to fully terminate, then return to main frame
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self returnToMainFrame];
+    });
+}
+
+- (void)checkSelectStartCombo:(int)buttonFlags {
+    BOOL selectPressed = (buttonFlags & BACK_FLAG) != 0;
+    BOOL startPressed = (buttonFlags & PLAY_FLAG) != 0;
+    
+    // Check if both select and start are pressed
+    if (selectPressed && startPressed) {
+        if (!_selectButtonPressed || !_startButtonPressed) {
+            // This is the start of the combo
+            _selectButtonPressed = YES;
+            _startButtonPressed = YES;
+            _selectStartPressTime = [NSDate date];
+            
+            // Start a timer for 3 seconds
+            _exitTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                          target:self
+                                                        selector:@selector(selectStartHoldComplete:)
+                                                        userInfo:nil
+                                                         repeats:NO];
+            
+            Log(LOG_D, @"Select+Start combo started - hold for 3 seconds to exit");
+        }
+    } else {
+        // One or both buttons released
+        if (_selectButtonPressed || _startButtonPressed) {
+            _selectButtonPressed = NO;
+            _startButtonPressed = NO;
+            _selectStartPressTime = nil;
+            
+            // Cancel the timer
+            if (_exitTimer) {
+                [_exitTimer invalidate];
+                _exitTimer = nil;
+            }
+            
+            Log(LOG_D, @"Select+Start combo cancelled");
+        }
+    }
+}
+
+- (void)selectStartHoldComplete:(NSTimer *)timer {
+    Log(LOG_I, @"Select+Start held for 3 seconds -- terminating stream");
+    [self terminateStreamAndReturn];
 }
 
 - (void)userInteractionBegan {

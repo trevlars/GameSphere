@@ -324,6 +324,7 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
 -(void) updateFinished:(Controller*)controller
 {
     BOOL exitRequested = NO;
+    uint32_t combinedButtonFlags = 0;
     
     [_controllerStreamLock lock];
     @synchronized(controller) {
@@ -354,6 +355,9 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
                 rightStickY = MAX_MAGNITUDE(rightStickY, controller.mergedWithController.lastRightStickY);
             }
             
+            // Store combined button flags for delegate callback
+            combinedButtonFlags = buttonFlags;
+            
             // Player 1 is always present for OSC
             LiSendMultiControllerEvent(_multiController ? controller.playerIndex : 0, [self getActiveGamepadMask],
                                        buttonFlags, leftTrigger, rightTrigger,
@@ -366,6 +370,13 @@ static const double MOUSE_SPEED_DIVISOR = 1.25;
         // Invoke the delegate callback on the main thread
         dispatch_async(dispatch_get_main_queue(), ^{
             [self->_delegate streamExitRequested];
+        });
+    }
+    
+    // Notify delegate about button changes for long press detection
+    if ([self->_delegate respondsToSelector:@selector(controllerButtonsChanged:)]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self->_delegate controllerButtonsChanged:(int)combinedButtonFlags];
         });
     }
 }

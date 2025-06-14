@@ -16,6 +16,7 @@
 - (void) gamepadPresenceChanged;
 - (void) mousePresenceChanged;
 - (void) streamExitRequested;
+- (void) controllerButtonsChanged:(int)buttonFlags;
 
 @end
 

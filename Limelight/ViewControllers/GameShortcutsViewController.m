@@ -107,6 +107,9 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     GameListManager *gameManager = [GameListManager sharedManager];
     [gameManager loadSavedGames];
     
+    // Clear existing games first
+    [self.allGames removeAllObjects];
+    
     if (gameManager.games && gameManager.games.count > 0) {
         [self.allGames addObjectsFromArray:gameManager.games];
         Log(LOG_I, @"GameShortcuts: Loaded %lu cached games from storage", (unsigned long)gameManager.games.count);
@@ -426,12 +429,19 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     GameListManager *gameManager = [GameListManager sharedManager];
     [gameManager loadSavedGames];
     
+    // Clear existing games first
+    [self.allGames removeAllObjects];
+    
     if (gameManager.games && gameManager.games.count > 0) {
         [self.allGames addObjectsFromArray:gameManager.games];
         Log(LOG_I, @"GameShortcuts: Loaded %lu saved games from storage", (unsigned long)gameManager.games.count);
     } else {
         Log(LOG_I, @"GameShortcuts: No saved games found in storage");
     }
+    
+    // Always add ROMs to the list
+    NSArray *roms = [self loadPlaceholderROMs];
+    [self.allGames addObjectsFromArray:roms];
 }
 
 - (NSArray *)loadPlaceholderROMs {
@@ -872,12 +882,17 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     
     @synchronized(self.hostList) {
         for (TemporaryHost* host in self.hostList) {
-            // Only include games from paired hosts that are online
-            if (host.pairState == PairStatePaired && host.state == StateOnline) {
-                Log(LOG_D, @"Loading games from host: %@ (apps: %lu)", host.name, (unsigned long)[host.appList count]);
+            // Include games from ALL discovered hosts (regardless of pairing/online status)
+            // This creates shortcuts for all games from all PC servers
+            if (host.appList && [host.appList count] > 0) {
+                Log(LOG_D, @"Loading games from host: %@ (apps: %lu, paired: %s, online: %s)", 
+                    host.name, 
+                    (unsigned long)[host.appList count],
+                    (host.pairState == PairStatePaired) ? "YES" : "NO",
+                    (host.state == StateOnline) ? "YES" : "NO");
                 [discoveredGames addObjectsFromArray:[host.appList allObjects]];
                 
-                // Start downloading thumbnails for these games
+                // Start downloading thumbnails for these games (even if not paired/online)
                 [self.appAssetManager retrieveAssetsFromHost:host];
             }
         }
