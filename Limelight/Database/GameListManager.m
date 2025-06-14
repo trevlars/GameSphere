@@ -9,6 +9,7 @@
 #import "GameListManager.h"
 #import "TemporaryApp.h"
 #import "TemporaryHost.h"
+#import "Utils.h"
 
 @implementation GameListManager
 
@@ -58,7 +59,9 @@
             @"hostExternalAddress": app.host.externalAddress ?: @"",
             @"hostHttpsPort": @(app.host.httpsPort),
             @"hostServerCert": app.host.serverCert ?: [NSData data],
-            @"hostServerCodecModeSupport": @(app.host.serverCodecModeSupport)
+            @"hostServerCodecModeSupport": @(app.host.serverCodecModeSupport),
+            @"hostPairState": @(app.host.pairState),
+            @"hostState": @(app.host.state)
         };
         [gameDataArray addObject:gameData];
     }
@@ -72,7 +75,9 @@
         @"externalAddress": self.selectedHost.externalAddress ?: @"",
         @"httpsPort": @(self.selectedHost.httpsPort),
         @"serverCert": self.selectedHost.serverCert ?: [NSData data],
-        @"serverCodecModeSupport": @(self.selectedHost.serverCodecModeSupport)
+        @"serverCodecModeSupport": @(self.selectedHost.serverCodecModeSupport),
+        @"pairState": @(self.selectedHost.pairState),
+        @"state": @(self.selectedHost.state)
     };
     
     NSDictionary *savedData = @{
@@ -128,6 +133,16 @@
         host.httpsPort = [hostData[@"httpsPort"] intValue];
         host.serverCert = hostData[@"serverCert"];
         host.serverCodecModeSupport = [hostData[@"serverCodecModeSupport"] intValue];
+        host.pairState = [hostData[@"pairState"] intValue];
+        host.state = [hostData[@"state"] intValue];
+        
+        // Fallback: if no pair state was saved, assume paired (since the host was saved from a working connection)
+        if (hostData[@"pairState"] == nil) {
+            host.pairState = PairStatePaired;
+        }
+        if (hostData[@"state"] == nil) {
+            host.state = StateOnline;
+        }
         
         self.selectedHost = host;
     }
@@ -152,6 +167,16 @@
         appHost.httpsPort = [gameData[@"hostHttpsPort"] intValue];
         appHost.serverCert = gameData[@"hostServerCert"];
         appHost.serverCodecModeSupport = [gameData[@"hostServerCodecModeSupport"] intValue];
+        appHost.pairState = [gameData[@"hostPairState"] intValue];
+        appHost.state = [gameData[@"hostState"] intValue];
+        
+        // Fallback: if no pair state was saved, assume paired (since the game was saved from a working connection)
+        if (gameData[@"hostPairState"] == nil) {
+            appHost.pairState = PairStatePaired;
+        }
+        if (gameData[@"hostState"] == nil) {
+            appHost.state = StateOnline;
+        }
         
         app.host = appHost;
         [restoredGames addObject:app];

@@ -22,7 +22,8 @@ typedef NS_ENUM(NSInteger, MoonlightRow) {
 };
 
 typedef NS_ENUM(NSInteger, ShortcutsRow) {
-    ShortcutsRowClear = 0,
+    ShortcutsRowRefresh = 0,
+    ShortcutsRowClear,
     ShortcutsRowCount
 };
 
@@ -127,6 +128,15 @@ typedef NS_ENUM(NSInteger, EmulatorsRow) {
             
         case SettingsSectionShortcuts:
             switch (indexPath.row) {
+                case ShortcutsRowRefresh:
+                    cell.textLabel.text = @"Refresh Games";
+                    cell.textLabel.textColor = [UIColor whiteColor];
+                    if (@available(tvOS 13.0, iOS 13.0, *)) {
+                        cell.imageView.image = [UIImage systemImageNamed:@"arrow.clockwise"];
+                    } else {
+                        cell.imageView.image = nil;
+                    }
+                    break;
                 case ShortcutsRowClear:
                     cell.textLabel.text = @"Clear All Shortcuts";
                     cell.textLabel.textColor = [UIColor systemRedColor];
@@ -173,6 +183,9 @@ typedef NS_ENUM(NSInteger, EmulatorsRow) {
             
         case SettingsSectionShortcuts:
             switch (indexPath.row) {
+                case ShortcutsRowRefresh:
+                    [self refreshGames];
+                    break;
                 case ShortcutsRowClear:
                     [self clearShortcuts];
                     break;
@@ -239,6 +252,23 @@ typedef NS_ENUM(NSInteger, EmulatorsRow) {
     [alert addAction:clearAction];
     [alert addAction:cancelAction];
     
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)refreshGames {
+    // Post notification to trigger a manual refresh
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ManualRefreshGamesRequested" object:nil];
+    
+    // Show confirmation
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Refreshing Games" 
+                                                                   message:@"Scanning for games from your gaming PC..." 
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" 
+                                                      style:UIAlertActionStyleDefault 
+                                                    handler:nil];
+    
+    [alert addAction:okAction];
     [self presentViewController:alert animated:YES completion:nil];
 }
 

@@ -55,6 +55,9 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 @property (nonatomic, strong) TemporaryHost *selectedHost;
 @property (nonatomic) BOOL background;
 
+// Automatic refresh timer
+@property (nonatomic, strong) NSTimer *autoRefreshTimer;
+
 @end
 
 @implementation GameShortcutsViewController
@@ -72,8 +75,12 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     self.boxArtCache = [[NSCache alloc] init];
     self.appAssetManager = [[AppAssetManager alloc] initWithCallback:self];
     
-    // Initialize discovery system
+    // Load cached games FIRST so the view isn't empty
+    [self loadCachedGames];
+    
+    // Initialize discovery system and start it immediately
     [self initializeDiscoverySystem];
+    [self startDiscoveryImmediately];
     
     [self setupBackground];
     [self setupNavigationBar];
@@ -82,7 +89,6 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     [self setupDescriptionLabel];
     [self setupConstraints];
     [self setupNotifications];
-    [self loadGames];
     
     // Authenticate with IGDB
     [[IGDBManager sharedManager] authenticateWithClientId:@"7aj0d5y3mglfxu2ni7mpvy5jg26rkb" 
@@ -94,6 +100,55 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
             NSLog(@"IGDB authentication failed: %@", error.localizedDescription);
         }
     }];
+}
+
+- (void)loadCachedGames {
+    // Load games from persistent storage immediately so view isn't empty
+    GameListManager *gameManager = [GameListManager sharedManager];
+    [gameManager loadSavedGames];
+    
+    if (gameManager.games && gameManager.games.count > 0) {
+        [self.allGames addObjectsFromArray:gameManager.games];
+        Log(LOG_I, @"GameShortcuts: Loaded %lu cached games from storage", (unsigned long)gameManager.games.count);
+    } else {
+        Log(LOG_I, @"GameShortcuts: No cached games found in storage");
+    }
+    
+    // Add placeholder ROM games for demo purposes
+    NSArray *roms = [self loadPlaceholderROMs];
+    [self.allGames addObjectsFromArray:roms];
+    
+    // Update UI immediately with cached games and ROMs
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.gameCollectionView reloadData];
+    });
+}
+
+- (void)startDiscoveryImmediately {
+    // Start discovery right away, don't wait for viewWillAppear
+    Log(LOG_I, @"GameShortcuts: Starting automatic discovery on app launch");
+    [self.discMan startDiscovery];
+    
+    // Set up automatic refresh timer for continuous discovery
+    [self setupAutomaticRefresh];
+}
+
+- (void)setupAutomaticRefresh {
+    // Set up a timer to automatically refresh discovery every 30 seconds
+    // This ensures we always have the latest games without manual intervention
+    self.autoRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:30.0
+                                                             target:self
+                                                           selector:@selector(performAutomaticRefresh)
+                                                           userInfo:nil
+                                                            repeats:YES];
+    Log(LOG_I, @"GameShortcuts: Automatic refresh timer started (30s intervals)");
+}
+
+- (void)performAutomaticRefresh {
+    if (!self.background) {
+        Log(LOG_D, @"GameShortcuts: Performing automatic discovery refresh");
+        [self.discMan startDiscovery];
+    }
 }
 
 - (void)initializeDiscoverySystem {
@@ -130,8 +185,8 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     [super viewWillAppear:animated];
     [self.navigationController setNavigationBarHidden:NO animated:animated];
     
-    // Start discovery when view appears
-    [self beginForegroundRefresh];
+    // Discovery is already running automatically, just ensure we're not in background mode
+    self.background = NO;
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -234,17 +289,12 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
         NSFontAttributeName: [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold]
     };
     
-    // Add refresh and settings buttons
-    UIBarButtonItem *refreshButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
-                                                                                   target:self
-                                                                                   action:@selector(refreshGames)];
-    
+    // Only add settings button - refresh is now automatic
     UIBarButtonItem *settingsButton = [[UIBarButtonItem alloc] initWithTitle:@"Settings"
                                                                        style:UIBarButtonItemStylePlain
                                                                       target:self
                                                                       action:@selector(showSettings)];
     
-    self.navigationItem.leftBarButtonItem = refreshButton;
     self.navigationItem.rightBarButtonItem = settingsButton;
 }
 
@@ -358,21 +408,17 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 }
 
 - (void)loadGames {
-    // First try to load from discovered hosts (live data)
+    // This method is called by notifications - just reload from hosts or cache
     if (self.hostList && [self.hostList count] > 0) {
         [self loadGamesFromHosts];
     } else {
         // Fallback: load saved games from persistent storage
         [self loadSavedGames];
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.gameCollectionView reloadData];
+        });
     }
-    
-    // Add placeholder ROM games (you can replace this with actual ROM loading logic)
-    NSArray *roms = [self loadPlaceholderROMs];
-    [self.allGames addObjectsFromArray:roms];
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.gameCollectionView reloadData];
-    });
 }
 
 - (void)loadSavedGames {
@@ -671,13 +717,7 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 
 #pragma mark - Actions
 
-- (void)refreshGames {
-    // Post notification to trigger a refresh from the main frame
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"RefreshGamesRequested" object:nil];
-    
-    // Also reload our current games
-    [self loadGames];
-}
+// refreshGames method removed - discovery is now automatic
 
 - (void)showSettings {
     GameSphereSettingsViewController *settingsVC = [[GameSphereSettingsViewController alloc] init];
@@ -699,7 +739,24 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
     });
 }
 
+- (void)handleManualRefresh:(NSNotification *)notification {
+    Log(LOG_I, @"GameShortcuts: Manual refresh requested from settings");
+    
+    // Force a fresh discovery scan
+    [self.discMan stopDiscovery];
+    [self.discMan resetDiscoveryState];
+    [self.discMan startDiscovery];
+}
+
 - (void)dealloc {
+    // Clean up timer
+    [self.autoRefreshTimer invalidate];
+    self.autoRefreshTimer = nil;
+    
+    // Stop discovery
+    [self.discMan stopDiscovery];
+    
+    // Remove observers
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -771,8 +828,8 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
                                                object:nil];
     
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(refreshGames)
-                                                 name:@"RefreshGamesRequested"
+                                             selector:@selector(handleManualRefresh:)
+                                                 name:@"ManualRefreshGamesRequested"
                                                object:nil];
 }
 
@@ -810,14 +867,15 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
 }
 
 - (void)loadGamesFromHosts {
-    [self.allGames removeAllObjects];
+    // Create a new array for discovered games
+    NSMutableArray *discoveredGames = [[NSMutableArray alloc] init];
     
     @synchronized(self.hostList) {
         for (TemporaryHost* host in self.hostList) {
             // Only include games from paired hosts that are online
             if (host.pairState == PairStatePaired && host.state == StateOnline) {
                 Log(LOG_D, @"Loading games from host: %@ (apps: %lu)", host.name, (unsigned long)[host.appList count]);
-                [self.allGames addObjectsFromArray:[host.appList allObjects]];
+                [discoveredGames addObjectsFromArray:[host.appList allObjects]];
                 
                 // Start downloading thumbnails for these games
                 [self.appAssetManager retrieveAssetsFromHost:host];
@@ -825,18 +883,48 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
         }
     }
     
-    // Sort games alphabetically
-    [self.allGames sortUsingSelector:@selector(compareName:)];
-    
-    // Save the updated games list
-    GameListManager *gameManager = [GameListManager sharedManager];
-    gameManager.games = [self.allGames copy];
-    [gameManager saveGamesData];
-    
-    // Reload the collection view
-    [self.gameCollectionView reloadData];
-    
-    Log(LOG_I, @"GameShortcuts: Loaded %lu games from discovered hosts", (unsigned long)[self.allGames count]);
+    // Only update if we actually discovered games
+    if (discoveredGames.count > 0) {
+        // Replace games with fresh discovery results
+        [self.allGames removeAllObjects];
+        [self.allGames addObjectsFromArray:discoveredGames];
+        
+        // Add ROMs to the updated list
+        NSArray *roms = [self loadPlaceholderROMs];
+        [self.allGames addObjectsFromArray:roms];
+        
+        // Sort Moonlight games alphabetically (keep ROMs at the end)
+        NSMutableArray *moonlightGames = [[NSMutableArray alloc] init];
+        NSMutableArray *romGames = [[NSMutableArray alloc] init];
+        
+        for (id game in self.allGames) {
+            if ([game isKindOfClass:[TemporaryApp class]]) {
+                [moonlightGames addObject:game];
+            } else {
+                [romGames addObject:game];
+            }
+        }
+        
+        [moonlightGames sortUsingSelector:@selector(compareName:)];
+        
+        [self.allGames removeAllObjects];
+        [self.allGames addObjectsFromArray:moonlightGames];
+        [self.allGames addObjectsFromArray:romGames];
+        
+        // Save only the Moonlight games (not ROMs)
+        GameListManager *gameManager = [GameListManager sharedManager];
+        gameManager.games = [moonlightGames copy];
+        [gameManager saveGamesData];
+        
+        // Reload the collection view
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.gameCollectionView reloadData];
+        });
+        
+        Log(LOG_I, @"GameShortcuts: Updated with %lu Moonlight games from discovered hosts", (unsigned long)moonlightGames.count);
+    } else {
+        Log(LOG_D, @"GameShortcuts: No online paired hosts found, keeping cached games");
+    }
 }
 
 @end 
