@@ -21,6 +21,7 @@
 #import "IdManager.h"
 #import "ControllerSupport.h"
 #import "Utils.h"
+#import "GameSphereSettingsViewController.h"
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <sys/utsname.h>
@@ -61,10 +62,10 @@
                                                                                    target:self 
                                                                                    action:@selector(refreshGames)];
     
-    UIBarButtonItem *settingsButton = [[UIBarButtonItem alloc] initWithTitle:@"Moonlight" 
+    UIBarButtonItem *settingsButton = [[UIBarButtonItem alloc] initWithTitle:@"Settings" 
                                                                        style:UIBarButtonItemStylePlain 
                                                                       target:self 
-                                                                      action:@selector(showOriginalMoonlight)];
+                                                                      action:@selector(showSettings)];
     
     self.navigationItem.rightBarButtonItems = @[refreshButton, settingsButton];
 }
@@ -147,18 +148,16 @@
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RefreshGamesRequested" object:nil];
 }
 
-- (void)showOriginalMoonlight {
-    // Load the original Moonlight storyboard and present it
-    UIStoryboard *storyboard;
-#if TARGET_OS_TV
-    storyboard = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
-#else
-    storyboard = [UIStoryboard storyboardWithName:@"iPhone" bundle:nil];
-#endif
+- (void)showSettings {
+    GameSphereSettingsViewController *settingsVC = [[GameSphereSettingsViewController alloc] init];
+    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:settingsVC];
     
-    UIViewController *originalVC = [storyboard instantiateInitialViewController];
-    originalVC.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:originalVC animated:YES completion:nil];
+    // Style the navigation bar to match the app theme
+    navController.navigationBar.barTintColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1.0];
+    navController.navigationBar.tintColor = [UIColor whiteColor];
+    navController.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName: [UIColor whiteColor]};
+    
+    [self presentViewController:navController animated:YES completion:nil];
 }
 
 #pragma mark - UICollectionViewDataSource

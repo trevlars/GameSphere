@@ -2,14 +2,14 @@
 //  SettingsViewController.h
 //  Moonlight
 //
-//  Created by Diego Waxemberg on 10/27/14.
-//  Copyright (c) 2014 Moonlight Stream. All rights reserved.
+//  Created by GameSphere on 6/13/25.
+//  Copyright © 2025 Moonlight Stream. All rights reserved.
 //
 
 #import <UIKit/UIKit.h>
 #import "AppDelegate.h"
 
-@interface SettingsViewController : UIViewController
+@interface SettingsViewController : UITableViewController
 @property (strong, nonatomic) IBOutlet UILabel *bitrateLabel;
 @property (strong, nonatomic) IBOutlet UISlider *bitrateSlider;
 @property (strong, nonatomic) IBOutlet UISegmentedControl *framerateSelector;

@@ -17,5 +17,8 @@
 
 + (instancetype)sharedManager;
 - (void)updateGamesFromHost:(TemporaryHost*)host;
+- (void)saveGamesData;
+- (void)loadSavedGames;
+- (void)clearSavedGames;
 
 @end 
