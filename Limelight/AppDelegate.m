@@ -39,12 +39,7 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 - (void)setupCustomRootViewController {
     // Create our custom game shortcuts view controller
-    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
-    layout.minimumLineSpacing = 20;
-    layout.minimumInteritemSpacing = 20;
-    layout.sectionInset = UIEdgeInsetsMake(20, 20, 20, 20);
-    
-    GameShortcutsViewController *gameShortcutsVC = [[GameShortcutsViewController alloc] initWithCollectionViewLayout:layout];
+    GameShortcutsViewController *gameShortcutsVC = [[GameShortcutsViewController alloc] init];
     
     // Wrap it in a navigation controller
     UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:gameShortcutsVC];

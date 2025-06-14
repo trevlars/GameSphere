@@ -10,7 +10,9 @@
 #import "GameListManager.h"
 #import "TemporaryApp.h"
 #import "TemporaryHost.h"
-#import "UIAppView.h"
+#import "GameGridCell.h"
+#import "IGDBManager.h"
+#import "GameSphereSettingsViewController.h"
 #import "MainFrameViewController.h"
 #import "StreamFrameViewController.h"
 #import "StreamConfiguration.h"
@@ -21,16 +23,38 @@
 #import "IdManager.h"
 #import "ControllerSupport.h"
 #import "Utils.h"
-#import "GameSphereSettingsViewController.h"
+#import "Log.h"
+#import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <sys/utsname.h>
-#include <Limelight.h>
 
-@interface GameShortcutsViewController () <AppCallback>
-@property (nonatomic, strong) NSArray<TemporaryApp *> *games;
-@property (nonatomic, strong) NSCache *boxArtCache;
+static NSString * const kGameCellIdentifier = @"GameGridCell";
+
+@interface GameShortcutsViewController ()
+
+@property (nonatomic, strong) UIView *backgroundGradientView;
+@property (nonatomic, strong) CAGradientLayer *backgroundGradient;
+@property (nonatomic, strong) UIVisualEffectView *blurEffectView;
+@property (nonatomic, strong) UIView *headerView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) NSIndexPath *focusedIndexPath;
+
+// Discovery and networking
+@property (nonatomic, strong) DiscoveryManager *discMan;
+@property (nonatomic, strong) NSString *uniqueId;
+@property (nonatomic, strong) NSData *clientCert;
 @property (nonatomic, strong) StreamConfiguration *streamConfig;
+
+// Operation queue for background tasks
+@property (nonatomic, strong) NSOperationQueue *opQueue;
+
+// Host management
+@property (nonatomic, strong) NSMutableSet *hostList;
+@property (nonatomic, strong) TemporaryHost *selectedHost;
+@property (nonatomic) BOOL background;
+
 @end
 
 @implementation GameShortcutsViewController
@@ -38,114 +62,621 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    // Initialize cache for box art
+    // Initialize properties
+    self.allGames = [[NSMutableArray alloc] init];
+    self.opQueue = [[NSOperationQueue alloc] init];
+    self.uniqueId = [IdManager getUniqueId];
+    self.clientCert = [CryptoManager readCertFromFile];
+    
+    // Initialize thumbnail management
     self.boxArtCache = [[NSCache alloc] init];
+    self.appAssetManager = [[AppAssetManager alloc] initWithCallback:self];
     
-    // Set up collection view
-    [self.collectionView registerClass:[UICollectionViewCell class] forCellWithReuseIdentifier:@"GameCell"];
-    self.collectionView.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.2 alpha:1.0];
+    // Initialize discovery system
+    [self initializeDiscoverySystem];
     
-    // Set title
-    self.title = @"GameSphere";
-    
-    // Load games from singleton
+    [self setupBackground];
+    [self setupNavigationBar];
+    [self setupHeaderView];
+    [self setupCollectionView];
+    [self setupDescriptionLabel];
+    [self setupConstraints];
+    [self setupNotifications];
     [self loadGames];
     
-    // Listen for game list updates
-    [[NSNotificationCenter defaultCenter] addObserver:self 
-                                             selector:@selector(gamesListUpdated:) 
-                                                 name:@"GamesListUpdated" 
-                                               object:nil];
-    
-    // Add refresh button and settings button
-    UIBarButtonItem *refreshButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh 
-                                                                                   target:self 
-                                                                                   action:@selector(refreshGames)];
-    
-    UIBarButtonItem *settingsButton = [[UIBarButtonItem alloc] initWithTitle:@"Settings" 
-                                                                       style:UIBarButtonItemStylePlain 
-                                                                      target:self 
-                                                                      action:@selector(showSettings)];
-    
-    self.navigationItem.rightBarButtonItems = @[refreshButton, settingsButton];
+    // Authenticate with IGDB
+    [[IGDBManager sharedManager] authenticateWithClientId:@"7aj0d5y3mglfxu2ni7mpvy5jg26rkb" 
+                                             clientSecret:@"g84eqdzwpz864ul5l5aolansgiaaea" 
+                                               completion:^(BOOL success, NSError *error) {
+        if (success) {
+            NSLog(@"IGDB authentication successful");
+        } else {
+            NSLog(@"IGDB authentication failed: %@", error.localizedDescription);
+        }
+    }];
 }
 
-- (void)loadGames {
-    GameListManager *manager = [GameListManager sharedManager];
-    self.games = manager.games ?: @[];
-    [self.collectionView reloadData];
+- (void)initializeDiscoverySystem {
+    // Set up crypto
+    [CryptoManager generateKeyPairUsingSSL];
     
-    // Show welcome message if no games
-    if (self.games.count == 0) {
-        [self showWelcomeMessage];
-    } else {
-        [self hideWelcomeMessage];
+    // Initialize host list
+    if (self.hostList == nil) {
+        self.hostList = [[NSMutableSet alloc] init];
+    }
+    
+    // Retrieve saved hosts
+    [self retrieveSavedHosts];
+    
+    // Initialize discovery manager
+    self.discMan = [[DiscoveryManager alloc] initWithHosts:[self.hostList allObjects] andCallback:self];
+}
+
+- (void)retrieveSavedHosts {
+    DataManager* dataMan = [[DataManager alloc] init];
+    NSArray* hosts = [dataMan getHosts];
+    @synchronized(self.hostList) {
+        [self.hostList addObjectsFromArray:hosts];
+        
+        // Initialize the non-persistent host state
+        for (TemporaryHost* host in self.hostList) {
+            host.pairState = PairStateUnknown;
+            host.state = StateUnknown;
+        }
     }
 }
 
-- (void)showWelcomeMessage {
-    // Remove existing welcome view
-    [self hideWelcomeMessage];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.navigationController setNavigationBarHidden:NO animated:animated];
     
-    UIView *welcomeView = [[UIView alloc] init];
-    welcomeView.tag = 999; // Tag for easy removal
-    welcomeView.backgroundColor = [UIColor clearColor];
+    // Start discovery when view appears
+    [self beginForegroundRefresh];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
     
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Welcome to GameSphere";
-    titleLabel.font = [UIFont boldSystemFontOfSize:24];
-    titleLabel.textColor = [UIColor whiteColor];
-    titleLabel.textAlignment = NSTextAlignmentCenter;
+    // Set up background/foreground notifications
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleReturnToForeground)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
     
-    UILabel *messageLabel = [[UILabel alloc] init];
-    messageLabel.text = @"Tap 'Moonlight' to connect to your gaming PC\nand discover your games!";
-    messageLabel.font = [UIFont systemFontOfSize:16];
-    messageLabel.textColor = [UIColor lightGrayColor];
-    messageLabel.textAlignment = NSTextAlignmentCenter;
-    messageLabel.numberOfLines = 0;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleEnterBackground)
+                                                 name:UIApplicationWillResignActiveNotification
+                                               object:nil];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
     
-    [welcomeView addSubview:titleLabel];
-    [welcomeView addSubview:messageLabel];
-    [self.view addSubview:welcomeView];
+    // Stop discovery when view disappears
+    [self.discMan stopDiscovery];
     
-    // Auto Layout
-    welcomeView.translatesAutoresizingMaskIntoConstraints = NO;
-    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    messageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    // Remove observers
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)beginForegroundRefresh {
+    if (!self.background) {
+        // Reset discovery state and start discovery
+        [self.discMan resetDiscoveryState];
+        [self.discMan startDiscovery];
+    }
+}
+
+- (void)handleReturnToForeground {
+    self.background = NO;
+    [self beginForegroundRefresh];
+}
+
+- (void)handleEnterBackground {
+    self.background = YES;
+    [self.discMan stopDiscovery];
+}
+
+- (void)setupBackground {
+    // Create futuristic gradient background
+    self.backgroundGradientView = [[UIView alloc] init];
+    [self.view addSubview:self.backgroundGradientView];
+    
+    self.backgroundGradient = [CAGradientLayer layer];
+    self.backgroundGradient.colors = @[
+        (id)[UIColor colorWithRed:0.05 green:0.05 blue:0.15 alpha:1.0].CGColor,
+        (id)[UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:1.0].CGColor,
+        (id)[UIColor colorWithRed:0.05 green:0.05 blue:0.1 alpha:1.0].CGColor
+    ];
+    self.backgroundGradient.locations = @[@0.0, @0.5, @1.0];
+    self.backgroundGradient.startPoint = CGPointMake(0.0, 0.0);
+    self.backgroundGradient.endPoint = CGPointMake(1.0, 1.0);
+    [self.backgroundGradientView.layer addSublayer:self.backgroundGradient];
+    
+    // Add subtle animated particles effect (optional)
+    [self addParticleEffect];
+}
+
+- (void)addParticleEffect {
+    // Create subtle floating particles for futuristic feel
+    for (int i = 0; i < 20; i++) {
+        UIView *particle = [[UIView alloc] init];
+        particle.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:0.1];
+        particle.layer.cornerRadius = 1.0;
+        [self.backgroundGradientView addSubview:particle];
+        
+        // Random position and size
+        CGFloat size = 2.0 + (arc4random_uniform(3));
+        particle.frame = CGRectMake(arc4random_uniform(400), arc4random_uniform(800), size, size);
+        
+        // Animate floating motion
+        [UIView animateWithDuration:10.0 + arc4random_uniform(10)
+                              delay:arc4random_uniform(5)
+                            options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            particle.transform = CGAffineTransformMakeTranslation(
+                -50 + arc4random_uniform(100),
+                -50 + arc4random_uniform(100)
+            );
+            particle.alpha = 0.05 + (arc4random_uniform(10) / 100.0);
+        } completion:nil];
+    }
+}
+
+- (void)setupNavigationBar {
+    self.title = @"GameSphere";
+    
+    // Style navigation bar
+    self.navigationController.navigationBar.barTintColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:0.95];
+    self.navigationController.navigationBar.tintColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:1.0];
+    self.navigationController.navigationBar.titleTextAttributes = @{
+        NSForegroundColorAttributeName: [UIColor whiteColor],
+        NSFontAttributeName: [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold]
+    };
+    
+    // Add refresh and settings buttons
+    UIBarButtonItem *refreshButton = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                                                                                   target:self
+                                                                                   action:@selector(refreshGames)];
+    
+    UIBarButtonItem *settingsButton = [[UIBarButtonItem alloc] initWithTitle:@"Settings"
+                                                                       style:UIBarButtonItemStylePlain
+                                                                      target:self
+                                                                      action:@selector(showSettings)];
+    
+    self.navigationItem.leftBarButtonItem = refreshButton;
+    self.navigationItem.rightBarButtonItem = settingsButton;
+}
+
+- (void)setupHeaderView {
+    // Create header view
+    self.headerView = [[UIView alloc] init];
+    self.headerView.backgroundColor = [UIColor clearColor];
+    [self.view addSubview:self.headerView];
+    
+    // Title label
+    self.titleLabel = [[UILabel alloc] init];
+    self.titleLabel.text = @"GameSphere";
+    self.titleLabel.textColor = [UIColor whiteColor];
+    self.titleLabel.font = [UIFont systemFontOfSize:28.0 weight:UIFontWeightBold];
+    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    [self.headerView addSubview:self.titleLabel];
+    
+    // Subtitle label
+    self.subtitleLabel = [[UILabel alloc] init];
+    self.subtitleLabel.text = @"Select a game to see its description";
+    self.subtitleLabel.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
+    self.subtitleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    self.subtitleLabel.textAlignment = NSTextAlignmentCenter;
+    [self.headerView addSubview:self.subtitleLabel];
+}
+
+- (void)setupCollectionView {
+    // Create collection view layout
+    UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
+    layout.scrollDirection = UICollectionViewScrollDirectionVertical;
+    layout.minimumInteritemSpacing = 20.0;
+    layout.minimumLineSpacing = 30.0;
+    layout.sectionInset = UIEdgeInsetsMake(20, 20, 20, 20);
+    
+    // Calculate item size based on screen width
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+    CGFloat itemsPerRow = (screenWidth > 1000) ? 6 : 4; // More items on larger screens
+    CGFloat itemWidth = (screenWidth - (layout.sectionInset.left + layout.sectionInset.right) - (layout.minimumInteritemSpacing * (itemsPerRow - 1))) / itemsPerRow;
+    CGFloat itemHeight = itemWidth * 1.4 + 40; // Aspect ratio + space for title
+    
+    layout.itemSize = CGSizeMake(itemWidth, itemHeight);
+    
+    // Create collection view
+    self.gameCollectionView = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:layout];
+    self.gameCollectionView.backgroundColor = [UIColor clearColor];
+    self.gameCollectionView.delegate = self;
+    self.gameCollectionView.dataSource = self;
+    self.gameCollectionView.showsVerticalScrollIndicator = NO;
+    self.gameCollectionView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+    
+    // Register cell
+    [self.gameCollectionView registerClass:[GameGridCell class] forCellWithReuseIdentifier:kGameCellIdentifier];
+    
+    [self.view addSubview:self.gameCollectionView];
+}
+
+- (void)setupDescriptionLabel {
+    // Create description label
+    self.descriptionLabel = [[UILabel alloc] init];
+    self.descriptionLabel.textColor = [UIColor whiteColor];
+    self.descriptionLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    self.descriptionLabel.numberOfLines = 0;
+    self.descriptionLabel.textAlignment = NSTextAlignmentCenter;
+    self.descriptionLabel.text = @"Select a game to see its description";
+    [self.view addSubview:self.descriptionLabel];
+}
+
+- (void)setupConstraints {
+    self.backgroundGradientView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.gameCollectionView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.headerView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     
     [NSLayoutConstraint activateConstraints:@[
-        [welcomeView.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [welcomeView.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [welcomeView.widthAnchor constraintEqualToConstant:300],
-        [welcomeView.heightAnchor constraintEqualToConstant:100],
+        // Background gradient
+        [self.backgroundGradientView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.backgroundGradientView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.backgroundGradientView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.backgroundGradientView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         
-        [titleLabel.topAnchor constraintEqualToAnchor:welcomeView.topAnchor],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:welcomeView.leadingAnchor],
-        [titleLabel.trailingAnchor constraintEqualToAnchor:welcomeView.trailingAnchor],
+        // Collection view
+        [self.gameCollectionView.topAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:20],
+        [self.gameCollectionView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.gameCollectionView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.gameCollectionView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-20],
         
-        [messageLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:10],
-        [messageLabel.leadingAnchor constraintEqualToAnchor:welcomeView.leadingAnchor],
-        [messageLabel.trailingAnchor constraintEqualToAnchor:welcomeView.trailingAnchor],
-        [messageLabel.bottomAnchor constraintEqualToAnchor:welcomeView.bottomAnchor]
+        // Header view
+        [self.headerView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.headerView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.headerView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.headerView.bottomAnchor constraintEqualToAnchor:self.gameCollectionView.topAnchor constant:-20],
+        
+        // Title label
+        [self.titleLabel.topAnchor constraintEqualToAnchor:self.headerView.topAnchor constant:15],
+        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor constant:20],
+        [self.titleLabel.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor constant:-20],
+        [self.titleLabel.bottomAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:-15],
+        
+        // Subtitle label
+        [self.subtitleLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:5],
+        [self.subtitleLabel.leadingAnchor constraintEqualToAnchor:self.titleLabel.leadingAnchor],
+        [self.subtitleLabel.trailingAnchor constraintEqualToAnchor:self.titleLabel.trailingAnchor],
+        [self.subtitleLabel.bottomAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:-15]
     ]];
 }
 
-- (void)hideWelcomeMessage {
-    UIView *welcomeView = [self.view viewWithTag:999];
-    if (welcomeView) {
-        [welcomeView removeFromSuperview];
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.backgroundGradient.frame = self.backgroundGradientView.bounds;
+}
+
+- (void)loadGames {
+    // First try to load from discovered hosts (live data)
+    if (self.hostList && [self.hostList count] > 0) {
+        [self loadGamesFromHosts];
+    } else {
+        // Fallback: load saved games from persistent storage
+        [self loadSavedGames];
+    }
+    
+    // Add placeholder ROM games (you can replace this with actual ROM loading logic)
+    NSArray *roms = [self loadPlaceholderROMs];
+    [self.allGames addObjectsFromArray:roms];
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.gameCollectionView reloadData];
+    });
+}
+
+- (void)loadSavedGames {
+    // Load games from persistent storage as fallback
+    GameListManager *gameManager = [GameListManager sharedManager];
+    [gameManager loadSavedGames];
+    
+    if (gameManager.games && gameManager.games.count > 0) {
+        [self.allGames addObjectsFromArray:gameManager.games];
+        Log(LOG_I, @"GameShortcuts: Loaded %lu saved games from storage", (unsigned long)gameManager.games.count);
+    } else {
+        Log(LOG_I, @"GameShortcuts: No saved games found in storage");
     }
 }
 
-- (void)gamesListUpdated:(NSNotification *)notification {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self loadGames];
-    });
+- (NSArray *)loadPlaceholderROMs {
+    // Add some placeholder ROM data
+    NSArray *placeholderROMs = @[
+        @{@"name": @"Super Mario Bros.", @"type": @"ROM", @"system": @"NES"},
+        @{@"name": @"The Legend of Zelda", @"type": @"ROM", @"system": @"NES"},
+        @{@"name": @"Sonic the Hedgehog", @"type": @"ROM", @"system": @"Genesis"},
+        @{@"name": @"Street Fighter II", @"type": @"ROM", @"system": @"SNES"},
+        @{@"name": @"Final Fantasy VII", @"type": @"ROM", @"system": @"PSX"}
+    ];
+    
+    return placeholderROMs;
 }
+
+- (void)authenticateWithIGDB {
+    IGDBManager *igdbManager = [IGDBManager sharedManager];
+    [igdbManager authenticateWithClientId:@"7aj0d5y3mglfxu2ni7mpvy5jg26rkb"
+                             clientSecret:@"g84eqdzwpz864ul5l5aolansgiaaea"
+                               completion:^(BOOL success, NSError *error) {
+        if (success) {
+            NSLog(@"IGDB authentication successful");
+            // Start loading metadata for ROMs
+            [self loadIGDBMetadataForROMs];
+        } else {
+            NSLog(@"IGDB authentication failed: %@", error.localizedDescription);
+        }
+    }];
+}
+
+- (void)loadIGDBMetadataForROMs {
+    // Load IGDB metadata for ROM games
+    for (NSInteger i = 0; i < self.allGames.count; i++) {
+        id game = self.allGames[i];
+        if ([game isKindOfClass:[NSDictionary class]] && [game[@"type"] isEqualToString:@"ROM"]) {
+            NSString *gameName = game[@"name"];
+            [self loadIGDBDataForGame:gameName atIndex:i];
+        }
+    }
+}
+
+- (void)loadIGDBDataForGame:(NSString *)gameName atIndex:(NSInteger)index {
+    IGDBManager *igdbManager = [IGDBManager sharedManager];
+    [igdbManager searchGameWithName:gameName completion:^(NSDictionary *gameData, NSError *error) {
+        if (gameData && !error) {
+            // Update the game data with IGDB info
+            NSMutableDictionary *updatedGame = [self.allGames[index] mutableCopy];
+            updatedGame[@"igdb_data"] = gameData;
+            updatedGame[@"summary"] = gameData[@"summary"] ?: @"No description available";
+            
+            // Get cover art if available
+            NSDictionary *cover = gameData[@"cover"];
+            if (cover && cover[@"image_id"]) {
+                NSString *imageURL = [igdbManager constructImageURL:cover[@"image_id"] size:@"cover_big"];
+                updatedGame[@"cover_url"] = imageURL;
+            }
+            
+            self.allGames[index] = updatedGame;
+            
+            // Reload the specific cell
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSIndexPath *indexPath = [NSIndexPath indexPathForItem:index inSection:0];
+                [self.gameCollectionView reloadItemsAtIndexPaths:@[indexPath]];
+            });
+        }
+    }];
+}
+
+#pragma mark - UICollectionViewDataSource
+
+- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
+    return self.allGames.count;
+}
+
+- (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    GameGridCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:kGameCellIdentifier forIndexPath:indexPath];
+    
+    id game = self.allGames[indexPath.item];
+    
+    if ([game isKindOfClass:[TemporaryApp class]]) {
+        [cell configureWithGame:(TemporaryApp *)game];
+    } else if ([game isKindOfClass:[NSDictionary class]]) {
+        [cell configureWithROM:(NSDictionary *)game];
+    }
+    
+    return cell;
+}
+
+#pragma mark - UICollectionViewDelegate
+
+- (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    id game = self.allGames[indexPath.item];
+    
+    if ([game isKindOfClass:[TemporaryApp class]]) {
+        // Launch Moonlight game
+        [self launchMoonlightGame:(TemporaryApp *)game];
+    } else if ([game isKindOfClass:[NSDictionary class]]) {
+        // Launch ROM game (placeholder for now)
+        [self launchROMGame:(NSDictionary *)game];
+    }
+}
+
+- (BOOL)collectionView:(UICollectionView *)collectionView shouldHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    return YES;
+}
+
+- (void)collectionView:(UICollectionView *)collectionView didHighlightItemAtIndexPath:(NSIndexPath *)indexPath {
+    [self updateFocusForIndexPath:indexPath];
+}
+
+- (void)updateFocusForIndexPath:(NSIndexPath *)indexPath {
+    // Remove focus from previous cell
+    if (self.focusedIndexPath) {
+        GameGridCell *previousCell = (GameGridCell *)[self.gameCollectionView cellForItemAtIndexPath:self.focusedIndexPath];
+        [previousCell setFocused:NO animated:YES];
+    }
+    
+    // Add focus to new cell
+    GameGridCell *currentCell = (GameGridCell *)[self.gameCollectionView cellForItemAtIndexPath:indexPath];
+    [currentCell setFocused:YES animated:YES];
+    
+    self.focusedIndexPath = indexPath;
+    
+    // Update description
+    [self updateDescriptionForGame:self.allGames[indexPath.item]];
+}
+
+- (void)updateDescriptionForGame:(id)game {
+    NSString *description = @"Select a game to see its description";
+    
+    if ([game isKindOfClass:[TemporaryApp class]]) {
+        TemporaryApp *app = (TemporaryApp *)game;
+        description = [NSString stringWithFormat:@"🎮 %@\nMoonlight Game - Ready to stream from your gaming PC", app.name];
+    } else if ([game isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *romGame = (NSDictionary *)game;
+        NSString *summary = romGame[@"summary"];
+        if (summary && summary.length > 0) {
+            description = [NSString stringWithFormat:@"🕹️ %@\n%@", romGame[@"name"], summary];
+        } else {
+            description = [NSString stringWithFormat:@"🕹️ %@\n%@ ROM - Classic gaming experience", romGame[@"name"], romGame[@"system"]];
+        }
+    }
+    
+    // Animate description update
+    [UIView animateWithDuration:0.3 animations:^{
+        self.subtitleLabel.text = description;
+    }];
+}
+
+#pragma mark - Game Launch Methods
+
+- (void)launchMoonlightGame:(TemporaryApp *)game {
+    if (!game || !game.host) {
+        Log(LOG_E, @"Cannot launch game: missing app or host information");
+        return;
+    }
+    
+    // Check if host is paired
+    if (game.host.pairState != PairStatePaired) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Device Not Paired"
+                                                                       message:@"This device is not paired with the gaming PC. Please use the Moonlight settings to pair with your PC first."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    
+    // Create stream configuration with all required properties
+    DataManager *dataMan = [[DataManager alloc] init];
+    TemporarySettings *settings = [dataMan getSettings];
+    
+    StreamConfiguration *streamConfig = [[StreamConfiguration alloc] init];
+    streamConfig.host = game.host.activeAddress; // Use activeAddress - the verified working address
+    streamConfig.httpsPort = game.host.httpsPort; // CRITICAL: HTTPS port for secure communication
+    streamConfig.appID = game.id;
+    streamConfig.appName = game.name;
+    streamConfig.serverCert = game.host.serverCert; // CRITICAL: Server certificate for authentication
+    
+    // Apply settings with correct type conversions
+    streamConfig.frameRate = [settings.framerate intValue];
+    if (@available(iOS 10.3, *)) {
+        // Don't stream more FPS than the display can show
+        if (streamConfig.frameRate > [UIScreen mainScreen].maximumFramesPerSecond) {
+            streamConfig.frameRate = (int)[UIScreen mainScreen].maximumFramesPerSecond;
+            Log(LOG_W, @"Clamping FPS to maximum refresh rate: %d", streamConfig.frameRate);
+        }
+    }
+    
+    streamConfig.height = [settings.height intValue];
+    streamConfig.width = [settings.width intValue];
+    
+#if TARGET_OS_TV
+    // Don't allow streaming 4K on the Apple TV HD
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    if (strcmp(systemInfo.machine, "AppleTV5,3") == 0 && streamConfig.height >= 2160) {
+        Log(LOG_W, @"4K streaming not supported on Apple TV HD");
+        streamConfig.width = 1920;
+        streamConfig.height = 1080;
+    }
+#endif
+    
+    streamConfig.bitRate = [settings.bitrate intValue];
+    streamConfig.optimizeGameSettings = settings.optimizeGames;
+    streamConfig.playAudioOnPC = settings.playAudioOnPC;
+    streamConfig.useFramePacing = settings.useFramePacing;
+    streamConfig.swapABXYButtons = settings.swapABXYButtons;
+    
+    // multiController must be set before calling getConnectedGamepadMask
+    streamConfig.multiController = settings.multiController;
+    streamConfig.gamepadMask = [ControllerSupport getConnectedGamepadMask:streamConfig];
+    
+    // Probe for supported channel configurations
+    int physicalOutputChannels = (int)[AVAudioSession sharedInstance].maximumOutputNumberOfChannels;
+    Log(LOG_I, @"Audio device supports %d channels", physicalOutputChannels);
+    
+    int numberOfChannels = MIN([settings.audioConfig intValue], physicalOutputChannels);
+    Log(LOG_I, @"Selected number of audio channels %d", numberOfChannels);
+    if (numberOfChannels >= 8) {
+        streamConfig.audioConfiguration = AUDIO_CONFIGURATION_71_SURROUND;
+    }
+    else if (numberOfChannels >= 6) {
+        streamConfig.audioConfiguration = AUDIO_CONFIGURATION_51_SURROUND;
+    }
+    else {
+        streamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
+    }
+    
+    streamConfig.serverCodecModeSupport = game.host.serverCodecModeSupport;
+    
+    // Set up video codec support
+    switch (settings.preferredCodec) {
+        case CODEC_PREF_AV1:
+#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
+            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
+                streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
+            }
+#endif
+            // Fall-through
+            
+        case CODEC_PREF_AUTO:
+        case CODEC_PREF_HEVC:
+            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
+                streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
+            }
+            // Fall-through
+            
+        case CODEC_PREF_H264:
+            streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264;
+            break;
+    }
+    
+    // HEVC is supported if the user wants it (or it's required by the chosen resolution) and the SoC supports it
+    if ((streamConfig.width > 4096 || streamConfig.height > 4096 || settings.enableHdr) && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
+        streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
+        
+        // HEVC Main10 is supported if the user wants it and the display supports it
+        if (settings.enableHdr && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
+            streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
+        }
+    }
+    
+#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
+    // Add the AV1 Main10 format if AV1 and HDR are both enabled and supported
+    if ((streamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && settings.enableHdr &&
+        VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
+        streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
+    }
+#endif
+    
+    // Create and present stream view controller
+    StreamFrameViewController *streamFrameVC = [[StreamFrameViewController alloc] init];
+    streamFrameVC.streamConfig = streamConfig;
+    
+    [self presentViewController:streamFrameVC animated:YES completion:nil];
+}
+
+- (void)launchROMGame:(NSDictionary *)romGame {
+    // Implement ROM game launch logic
+    NSLog(@"Launching ROM game: %@", romGame[@"name"]);
+    // You'll need to implement the actual ROM launch logic here
+}
+
+#pragma mark - Actions
 
 - (void)refreshGames {
     // Post notification to trigger a refresh from the main frame
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RefreshGamesRequested" object:nil];
+    
+    // Also reload our current games
+    [self loadGames];
 }
 
 - (void)showSettings {
@@ -160,197 +691,152 @@
     [self presentViewController:navController animated:YES completion:nil];
 }
 
-#pragma mark - UICollectionViewDataSource
+#pragma mark - Notifications
 
-- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
-    return self.games.count;
-}
-
-- (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
-    UICollectionViewCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:@"GameCell" forIndexPath:indexPath];
-    
-    // Remove any existing subviews
-    for (UIView *subview in cell.subviews) {
-        [subview removeFromSuperview];
-    }
-    
-    TemporaryApp *app = self.games[indexPath.row];
-    UIAppView *appView = [[UIAppView alloc] initWithApp:app cache:self.boxArtCache andCallback:self];
-    
-    // Scale the app view to fit the cell
-    if (appView.bounds.size.width > 10.0) {
-        CGFloat scale = cell.bounds.size.width / appView.bounds.size.width;
-        [appView setCenter:CGPointMake(appView.bounds.size.width / 2 * scale, appView.bounds.size.height / 2 * scale)];
-        appView.transform = CGAffineTransformMakeScale(scale, scale);
-    }
-    
-    [cell addSubview:appView];
-    
-    // Add shadow
-    UIBezierPath *shadowPath = [UIBezierPath bezierPathWithRect:cell.bounds];
-    cell.layer.masksToBounds = NO;
-    cell.layer.shadowColor = [UIColor blackColor].CGColor;
-    cell.layer.shadowOffset = CGSizeMake(1.0f, 5.0f);
-    cell.layer.shadowPath = shadowPath.CGPath;
-    cell.layer.shadowOpacity = 0.3f;
-    
-#if !TARGET_OS_TV
-    cell.layer.borderWidth = 1;
-    cell.layer.borderColor = [[UIColor colorWithRed:0 green:0 blue:0 alpha:0.3f] CGColor];
-    cell.exclusiveTouch = YES;
-#endif
-    
-    return cell;
-}
-
-#pragma mark - UICollectionViewDelegate
-
-#if TARGET_OS_TV
-- (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
-    TemporaryApp *app = self.games[indexPath.row];
-    [self appClicked:app view:nil];
-}
-#endif
-
-#pragma mark - AppCallback
-
-- (void)appClicked:(TemporaryApp *)app view:(UIView *)view {
-    // Prepare stream configuration and launch the game directly
-    [self prepareToStreamApp:app];
-    [self launchStreamingViewController];
-}
-
-- (void)appLongClicked:(TemporaryApp *)app view:(UIView *)view {
-    // For now, just treat long clicks as regular clicks
-    [self appClicked:app view:view];
-}
-
-#pragma mark - Game Launching
-
-- (void)prepareToStreamApp:(TemporaryApp *)app {
-    self.streamConfig = [[StreamConfiguration alloc] init];
-    self.streamConfig.host = app.host.activeAddress;
-    self.streamConfig.httpsPort = app.host.httpsPort;
-    self.streamConfig.appID = app.id;
-    self.streamConfig.appName = app.name;
-    self.streamConfig.serverCert = app.host.serverCert;
-    
-    DataManager* dataMan = [[DataManager alloc] init];
-    TemporarySettings* streamSettings = [dataMan getSettings];
-    
-    self.streamConfig.frameRate = [streamSettings.framerate intValue];
-    if (@available(iOS 10.3, *)) {
-        // Don't stream more FPS than the display can show
-        if (self.streamConfig.frameRate > [UIScreen mainScreen].maximumFramesPerSecond) {
-            self.streamConfig.frameRate = (int)[UIScreen mainScreen].maximumFramesPerSecond;
-            Log(LOG_W, @"Clamping FPS to maximum refresh rate: %d", self.streamConfig.frameRate);
-        }
-    }
-    
-    self.streamConfig.height = [streamSettings.height intValue];
-    self.streamConfig.width = [streamSettings.width intValue];
-#if TARGET_OS_TV
-    // Don't allow streaming 4K on the Apple TV HD
-    struct utsname systemInfo;
-    uname(&systemInfo);
-    if (strcmp(systemInfo.machine, "AppleTV5,3") == 0 && self.streamConfig.height >= 2160) {
-        Log(LOG_W, @"4K streaming not supported on Apple TV HD");
-        self.streamConfig.width = 1920;
-        self.streamConfig.height = 1080;
-    }
-#endif
-    
-    self.streamConfig.bitRate = [streamSettings.bitrate intValue];
-    self.streamConfig.optimizeGameSettings = streamSettings.optimizeGames;
-    self.streamConfig.playAudioOnPC = streamSettings.playAudioOnPC;
-    self.streamConfig.useFramePacing = streamSettings.useFramePacing;
-    self.streamConfig.swapABXYButtons = streamSettings.swapABXYButtons;
-    
-    // multiController must be set before calling getConnectedGamepadMask
-    self.streamConfig.multiController = streamSettings.multiController;
-    self.streamConfig.gamepadMask = [ControllerSupport getConnectedGamepadMask:self.streamConfig];
-    
-    // Probe for supported channel configurations
-    int physicalOutputChannels = (int)[AVAudioSession sharedInstance].maximumOutputNumberOfChannels;
-    Log(LOG_I, @"Audio device supports %d channels", physicalOutputChannels);
-    
-    int numberOfChannels = MIN([streamSettings.audioConfig intValue], physicalOutputChannels);
-    Log(LOG_I, @"Selected number of audio channels %d", numberOfChannels);
-    if (numberOfChannels >= 8) {
-        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_71_SURROUND;
-    }
-    else if (numberOfChannels >= 6) {
-        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_51_SURROUND;
-    }
-    else {
-        self.streamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    }
-    
-    self.streamConfig.serverCodecModeSupport = app.host.serverCodecModeSupport;
-    
-    switch (streamSettings.preferredCodec) {
-        case CODEC_PREF_AV1:
-#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
-            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
-                self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
-            }
-#endif
-            // Fall-through
-            
-        case CODEC_PREF_AUTO:
-        case CODEC_PREF_HEVC:
-            if (VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
-                self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
-            }
-            // Fall-through
-            
-        case CODEC_PREF_H264:
-            self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264;
-            break;
-    }
-    
-    // HEVC is supported if the user wants it (or it's required by the chosen resolution) and the SoC supports it
-    if ((self.streamConfig.width > 4096 || self.streamConfig.height > 4096 || streamSettings.enableHdr) && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) {
-        self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
-        
-        // HEVC Main10 is supported if the user wants it and the display supports it
-        if (streamSettings.enableHdr && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
-            self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
-        }
-    }
-    
-#if defined(__IPHONE_16_0) || defined(__TVOS_16_0)
-    // Add the AV1 Main10 format if AV1 and HDR are both enabled and supported
-    if ((self.streamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && streamSettings.enableHdr &&
-        VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) && (AVPlayer.availableHDRModes & AVPlayerHDRModeHDR10) != 0) {
-        self.streamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
-    }
-#endif
-}
-
-- (void)launchStreamingViewController {
-    // Create the streaming view controller directly since it doesn't have a storyboard identifier
-    StreamFrameViewController *streamVC = [[StreamFrameViewController alloc] init];
-    
-    // Set the stream configuration
-    streamVC.streamConfig = self.streamConfig;
-    
-    // Present the streaming view controller
-    [self.navigationController pushViewController:streamVC animated:YES];
-}
-
-#pragma mark - UICollectionViewDelegateFlowLayout
-
-- (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)collectionViewLayout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
-#if TARGET_OS_TV
-    return CGSizeMake(300, 400);
-#else
-    return CGSizeMake(150, 200);
-#endif
+- (void)handleGamesUpdated:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self loadGames];
+    });
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)showOriginalMoonlight {
+    // Create the original MainFrameViewController
+    UIStoryboard *storyboard;
+    
+#if TARGET_OS_TV
+    storyboard = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
+#else
+    storyboard = [UIStoryboard storyboardWithName:@"Main_iPhone" bundle:nil];
+#endif
+    
+    MainFrameViewController *mainFrameVC = [storyboard instantiateViewControllerWithIdentifier:@"MainFrameViewController"];
+    
+    if (!mainFrameVC) {
+        // Fallback: create manually if storyboard instantiation fails
+        mainFrameVC = [[MainFrameViewController alloc] init];
+    }
+    
+    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:mainFrameVC];
+    
+    // Style the navigation bar to match Moonlight's theme
+    navController.navigationBar.barTintColor = [UIColor colorWithRed:0.33 green:0.33 blue:0.33 alpha:1.0];
+    navController.navigationBar.tintColor = [UIColor whiteColor];
+    navController.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName: [UIColor whiteColor]};
+    navController.navigationBar.translucent = NO;
+    
+    [self presentViewController:navController animated:YES completion:nil];
+}
+
+- (void)launchGame:(TemporaryApp *)app {
+    if (!app || !app.host) {
+        Log(LOG_E, @"Cannot launch game: missing app or host information");
+        return;
+    }
+    
+    // Create stream configuration
+    DataManager *dataMan = [[DataManager alloc] init];
+    TemporarySettings *settings = [dataMan getSettings];
+    
+    StreamConfiguration *streamConfig = [[StreamConfiguration alloc] init];
+    streamConfig.host = app.host.activeAddress; // Use activeAddress - the verified working address
+    streamConfig.appID = app.id;
+    streamConfig.appName = app.name;
+    
+    // Apply settings with correct type conversions
+    streamConfig.frameRate = [settings.framerate intValue];
+    streamConfig.bitRate = [settings.bitrate intValue];
+    streamConfig.height = [settings.height intValue];
+    streamConfig.width = [settings.width intValue];
+    streamConfig.optimizeGameSettings = settings.optimizeGames;
+    streamConfig.multiController = settings.multiController;
+    streamConfig.playAudioOnPC = settings.playAudioOnPC;
+    streamConfig.useFramePacing = settings.useFramePacing;
+    streamConfig.swapABXYButtons = settings.swapABXYButtons;
+    
+    // Create and present stream view controller
+    StreamFrameViewController *streamFrameVC = [[StreamFrameViewController alloc] init];
+    streamFrameVC.streamConfig = streamConfig;
+    
+    [self presentViewController:streamFrameVC animated:YES completion:nil];
+}
+
+- (void)setupNotifications {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleGamesUpdated:)
+                                                 name:@"GamesUpdatedNotification"
+                                               object:nil];
+    
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(refreshGames)
+                                                 name:@"RefreshGamesRequested"
+                                               object:nil];
+}
+
+#pragma mark - AppAssetCallback
+
+- (void)receivedAssetForApp:(TemporaryApp *)app {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Find the index of this app in our games array
+        NSInteger index = [self.allGames indexOfObject:app];
+        if (index != NSNotFound) {
+            // Reload the specific cell to show the new thumbnail
+            NSIndexPath *indexPath = [NSIndexPath indexPathForItem:index inSection:0];
+            [self.gameCollectionView reloadItemsAtIndexPaths:@[indexPath]];
+        }
+    });
+}
+
+#pragma mark - DiscoveryCallback
+
+- (void)updateAllHosts:(NSArray *)hosts {
+    // We must copy the array here because it could be modified
+    // before our main thread dispatch happens.
+    NSArray* hostsCopy = [NSArray arrayWithArray:hosts];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Log(LOG_D, @"GameShortcuts: New host list received with %lu hosts", (unsigned long)[hostsCopy count]);
+        
+        @synchronized(self.hostList) {
+            [self.hostList removeAllObjects];
+            [self.hostList addObjectsFromArray:hostsCopy];
+        }
+        
+        // Reload games from updated hosts
+        [self loadGamesFromHosts];
+    });
+}
+
+- (void)loadGamesFromHosts {
+    [self.allGames removeAllObjects];
+    
+    @synchronized(self.hostList) {
+        for (TemporaryHost* host in self.hostList) {
+            // Only include games from paired hosts that are online
+            if (host.pairState == PairStatePaired && host.state == StateOnline) {
+                Log(LOG_D, @"Loading games from host: %@ (apps: %lu)", host.name, (unsigned long)[host.appList count]);
+                [self.allGames addObjectsFromArray:[host.appList allObjects]];
+                
+                // Start downloading thumbnails for these games
+                [self.appAssetManager retrieveAssetsFromHost:host];
+            }
+        }
+    }
+    
+    // Sort games alphabetically
+    [self.allGames sortUsingSelector:@selector(compareName:)];
+    
+    // Save the updated games list
+    GameListManager *gameManager = [GameListManager sharedManager];
+    gameManager.games = [self.allGames copy];
+    [gameManager saveGamesData];
+    
+    // Reload the collection view
+    [self.gameCollectionView reloadData];
+    
+    Log(LOG_I, @"GameShortcuts: Loaded %lu games from discovered hosts", (unsigned long)[self.allGames count]);
 }
 
 @end 

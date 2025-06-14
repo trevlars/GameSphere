@@ -193,17 +193,31 @@ typedef NS_ENUM(NSInteger, EmulatorsRow) {
 #pragma mark - Actions
 
 - (void)openMoonlight {
-    // Load the original Moonlight storyboard and present it
-    UIStoryboard *storyboard;
+    [self dismissViewControllerAnimated:YES completion:^{
+        // Create the original Moonlight interface
+        UIStoryboard *storyboard;
+        
 #if TARGET_OS_TV
-    storyboard = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
+        storyboard = [UIStoryboard storyboardWithName:@"Main" bundle:nil];
+        // Get the navigation controller which contains MainFrameViewController
+        UINavigationController *navController = [storyboard instantiateInitialViewController];
 #else
-    storyboard = [UIStoryboard storyboardWithName:@"iPhone" bundle:nil];
+        // For iOS, use the appropriate storyboard
+        if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+            storyboard = [UIStoryboard storyboardWithName:@"iPad" bundle:nil];
+        } else {
+            storyboard = [UIStoryboard storyboardWithName:@"iPhone" bundle:nil];
+        }
+        UIViewController *mainFrameVC = [storyboard instantiateInitialViewController];
+        UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:mainFrameVC];
 #endif
-    
-    UIViewController *originalVC = [storyboard instantiateInitialViewController];
-    originalVC.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:originalVC animated:YES completion:nil];
+        
+        // Get the root view controller (should be GameShortcutsViewController)
+        UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+        
+        // Present the Moonlight interface
+        [rootVC presentViewController:navController animated:YES completion:nil];
+    }];
 }
 
 - (void)clearShortcuts {
