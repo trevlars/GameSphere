@@ -392,7 +392,7 @@ static NSString * const kGameCellIdentifier = @"GameGridCell";
         [self.gameCollectionView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-20],
         
         // Header view
-        [self.headerView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.headerView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
         [self.headerView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.headerView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.headerView.bottomAnchor constraintEqualToAnchor:self.gameCollectionView.topAnchor constant:-20],

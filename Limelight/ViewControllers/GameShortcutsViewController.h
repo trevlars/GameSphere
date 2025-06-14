@@ -19,4 +19,6 @@
 @property (nonatomic, strong) AppAssetManager *appAssetManager;
 @property (nonatomic, strong) NSCache *boxArtCache;
 
+- (void)showSettings;
+
 @end 
